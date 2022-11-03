@@ -30,9 +30,16 @@ from ppocr.utils.logging import get_logger
 def str2bool(v):
     return v.lower() in ("true", "t", "1")
 
-
+def printepilog():
+    print("hi")
+    
 def init_args():
-    parser = argparse.ArgumentParser(description = 'A python script that integrate both detection and recognition inference into a pipeline. To predict, RUN "python3 tools/infer/predict_system.py --gpu_mem=21000 --det_limit_side_len=1080 --use_mp=True --total_process_num=8 --warmup=True"', epilog='Notes: The provided options are tested under gpu RTX3090, for optiomal usage, please consider changing the paramters --gpu_mem, --use_mp, --total_process_num, and --det_limit_side_len. The reduce in parameter --det_limit_side_len will increase the fps at the tradeoff of accuracy. For single-thread prediction, set --use_mp=False, and do not set --total_process_num. To use cpu for prediction, set --use_gpu=False. To show debug messages, set --show_log=True. To save prediction in images, set --save_as_image=True, where saving in images will reduce fps drastically.')
+    parser = argparse.ArgumentParser(description = 'A python script that integrate both detection and recognition inference into a pipeline. \
+        To predict with GPU, RUN "python3 tools/infer/predict_system.py --gpu_mem=21000 --det_limit_side_len=1080 --use_mp=True --total_process_num=8 --warmup=True". \
+            To predict with CPU, RUN "python3 tools/infer/predict_system.py --use_gpu=False --det_limit_side_len=1080 --enable_mkldnn=True --cpu_threads=12 --warmup=True".',
+            epilog='Notes: The provided options are tested under AMD Ryzen 9 5900X 12-Core Processor and gpu RTX3090, for optiomal usage, please consider changing the paramters --gpu_mem, --cpu_threads, --use_mp, --total_process_num, and --det_limit_side_len. \
+                The reduce in parameter --det_limit_side_len will increase the fps at the tradeoff of accuracy. For single-thread prediction, set --use_mp=False, and do not set --total_process_num to default it to 1. \
+                    To use cpu for prediction, set --use_gpu=False. To show debug messages, set --show_log=True. To save prediction in images, set --save_as_image=True, where saving in images will reduce fps drastically.')
     # params for prediction engine
     parser.add_argument("--use_gpu", type=str2bool, default=True, help='To use GPU or not. (default=True)')
     parser.add_argument("--use_xpu", type=str2bool, default=False, help=argparse.SUPPRESS)
@@ -118,10 +125,10 @@ def init_args():
     parser.add_argument("--cls_batch_num", type=int, default=6, help=argparse.SUPPRESS)
     parser.add_argument("--cls_thresh", type=float, default=0.9, help=argparse.SUPPRESS)
 
-    parser.add_argument("--enable_mkldnn", type=str2bool, default=False)
-    parser.add_argument("--cpu_threads", type=int, default=10)
+    parser.add_argument("--enable_mkldnn", type=str2bool, default=False, help="Intel(R) Math Kernel Library for Deep Neural Networks(MKL-DNN) includes basic building blocks for neural networks optimized for Intel Architecture Processors and Intel Processors Graphics. (default=False)")
+    parser.add_argument("--cpu_threads", type=int, default=10, help="The no. of cpu threads to use in prediction. (default=10)")
     parser.add_argument("--use_pdserving", type=str2bool, default=False, help=argparse.SUPPRESS)
-    parser.add_argument("--warmup", type=str2bool, default=False)
+    parser.add_argument("--warmup", type=str2bool, default=False, help='To make some arbitrary predictions before beginning the main prediction, enable this to stabilise the fps when benchmarking. (default=False)')
 
     # SR parmas
     parser.add_argument("--sr_model_dir", type=str, help=argparse.SUPPRESS)

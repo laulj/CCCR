@@ -1,2 +1,0 @@
-To predict, RUN "python3 tools/infer/predict_system.py --gpu_mem=21000 --det_limit_side_len=1080 --use_mp=True --total_process_num=8 --warmup=True"
-To display help RUN "python3 tools/infer/predict_system.py -h"
