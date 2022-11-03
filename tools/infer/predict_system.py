@@ -36,11 +36,11 @@ from ppocr.utils.utility import get_image_file_list, check_and_read
 from ppocr.utils.logging import get_logger
 from tools.infer.utility import draw_ocr_box_txt, get_rotate_crop_image, get_minarea_rect_crop
 # My libraries
+import datetime
 from tools.eval_manual import m_eval
 from tools.firebase_read import fb_pull
 from tools.cd_val import *
 logger = get_logger()
-res_log = []
 fps_var = []
 
 class TextSystem(object):
@@ -114,6 +114,11 @@ class TextSystem(object):
         time_dict['all'] = end - start
         return filter_boxes, filter_rec_res, time_dict
 
+def cleartempfiles():
+    # Remove present result log file
+    filelist = [f for f in os.listdir(save_log_path) if f.endswith(".txt") ]
+    for f in filelist:
+        os.remove(os.path.join(save_log_path, f))
 
 def sorted_boxes(dt_boxes):
     """
@@ -185,6 +190,7 @@ def main(args):
             starttime = time.time()
             dt_boxes, rec_res, time_dict = text_sys(img)
             elapse = time.time() - starttime
+            now = datetime.datetime.now()
             total_time += elapse
             if len(imgs) > 1:
                 logger.debug(
@@ -199,10 +205,13 @@ def main(args):
                 logger.debug("{}, {:.3f}".format(text, score))
 
                 # Append the results
-                res_log.append(image_file + "\t" + "{}\t{:.3f}".format(text, score) + "\n")
-                # Concatenate the results if they are two-lines
-                if _predict[0][0] != "NULL":
-                    res_log.append(image_file + "\t" + "{}\t{:.3f}".format(_predict[0][0] + " " + text, (score + _predict[0][1]) / 2) + "\n")
+                with open(save_log_path + "result.txt", "a") as fout:
+                    fout.write(now.strftime("%Y-%m-%d %H:%M:%S") + "\t" + image_file + "\t" + "{}\t{:.3f}".format(text, score) + "\n")
+                    # Concatenate the results if they are two-lines
+                    if _predict[0][0] != "NULL":
+                        fout.write(now.strftime("%Y-%m-%d %H:%M:%S") + "\t" + image_file + "\t" + "{}\t{:.3f}".format(_predict[0][0] + " " + text, (score + _predict[0][1]) / 2) + "\n")
+                
+                # Should the prediction be concatenated if they are possibly two-lines
                 if len(text) < 5:
                     _predict[0] = (text, score)
                 else:
@@ -255,23 +264,20 @@ def main(args):
         # The number of images
         count += 1
         
-    logger.info(f"Total prediction time for (detection, recognition, total, total + reading + writing)) = ({time_dict['det']:.3}, {time_dict['rec']:.3}, {time_dict['all']:.3}, {time.time() - _st:.3})s")
+    logger.info(f"Thread {thread_id}: Total prediction time for (detection, recognition, total, total + reading + writing)) = ({time_dict['det']:.3}, {time_dict['rec']:.3}, {time_dict['all']:.3}, {time.time() - _st:.3})s")
     
     # Stash the results
-    #thread_totaltime = float(total_time)
     thread_totaltime = float(time.time() - _st)
     thread_fps = count*total_process_num/thread_totaltime
 
-    #logger.info("The predict total time is {}".format(thread_totaltime))
     logger.info("The frame per second (fps) is {}".format(thread_fps))
-    fps_var.append(str(thread_totaltime) +"\n")
-    with open(save_log_path + "result.txt", "a") as fout:
-        for line in res_log:
-            fout.write(line)
+    
     # Stash all the thread's running time
-    with open(save_log_path + "processes_time.txt", "a") as fout:  
-        for line in fps_var:
-            fout.write(line)
+    if args.test_run == True:
+        fps_var.append(str(thread_totaltime) +"\n")
+        with open(save_log_path + "processes_time.txt", "a") as fout:  
+            for line in fps_var:
+                fout.write(line)
             
     if args.benchmark:
         text_sys.text_detector.autolog.report()
@@ -283,19 +289,17 @@ def main(args):
             encoding='utf-8') as f:
         f.writelines(save_results)
 
-
 if __name__ == "__main__":
     args = utility.parse_args()
+
     # Parse agruments
     save_log_path = args.save_log_path
     ground_truth_path = args.ground_truth_path
     total_process_num = args.total_process_num
     thread_id = args.process_id
     
-    # Remove present result log file
-    filelist = [f for f in os.listdir(save_log_path) if f.endswith(".txt") ]
-    for f in filelist:
-        os.remove(os.path.join(save_log_path, f))
+    # Clear temp files
+    cleartempfiles()
            
     if args.use_mp:
         p_list = []
@@ -313,6 +317,6 @@ if __name__ == "__main__":
     else:
         main(args)
         
-    if thread_id == 0:
+    if thread_id == 0 and args.test_run == True:
         # Post-processing the results
         m_eval(save_log_path, ground_truth_path)

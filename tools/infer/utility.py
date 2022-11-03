@@ -41,7 +41,7 @@ def init_args():
                 The reduce in parameter --det_limit_side_len will increase the fps at the tradeoff of accuracy. For single-thread prediction, set --use_mp=False, and do not set --total_process_num to default it to 1. \
                     To use cpu for prediction, set --use_gpu=False. To show debug messages, set --show_log=True. To save prediction in images, set --save_as_image=True, where saving in images will reduce fps drastically.')
     # params for prediction engine
-    parser.add_argument("--use_gpu", type=str2bool, default=True, help='To use GPU or not. (default=True)')
+    parser.add_argument("--use_gpu", type=str2bool, default=True, help='Whether to enable GPU for prediction. (default=True)')
     parser.add_argument("--use_xpu", type=str2bool, default=False, help=argparse.SUPPRESS)
     parser.add_argument("--use_npu", type=str2bool, default=False, help=argparse.SUPPRESS)
     parser.add_argument("--ir_optim", type=str2bool, default=True, help=argparse.SUPPRESS)
@@ -51,7 +51,7 @@ def init_args():
     parser.add_argument("--gpu_mem", type=int, default=500, help='The limit on GPU memory usage. (default: 500)')
 
     # params for text detector
-    parser.add_argument("--image_dir", type=str, default="./firebase_pull/", help='The image to be processed, input images directory. (default="./firebase_pull/")')
+    parser.add_argument("--image_dir", type=str, default="./test_data/", help='The image to be processed, input images directory. (default="./firebase_pull/")')
     parser.add_argument("--page_num", type=int, default=0, help=argparse.SUPPRESS)
     parser.add_argument("--det_algorithm", type=str, default='DB', help=argparse.SUPPRESS)
     parser.add_argument("--det_model_dir", type=str,  default="./inference/det_db_r50_vd/", help='The detection model inference path. (default="./inference/det_db_r50_vd/")')
@@ -126,7 +126,7 @@ def init_args():
     parser.add_argument("--cls_thresh", type=float, default=0.9, help=argparse.SUPPRESS)
 
     parser.add_argument("--enable_mkldnn", type=str2bool, default=False, help="Intel(R) Math Kernel Library for Deep Neural Networks(MKL-DNN) includes basic building blocks for neural networks optimized for Intel Architecture Processors and Intel Processors Graphics. (default=False)")
-    parser.add_argument("--cpu_threads", type=int, default=10, help="The no. of cpu threads to use in prediction. (default=10)")
+    parser.add_argument("--cpu_threads", type=int, default=10, help="The limit of the no. of cpu threads to use in prediction. (default=10)")
     parser.add_argument("--use_pdserving", type=str2bool, default=False, help=argparse.SUPPRESS)
     parser.add_argument("--warmup", type=str2bool, default=False, help='To make some arbitrary predictions before beginning the main prediction, enable this to stabilise the fps when benchmarking. (default=False)')
 
@@ -137,6 +137,7 @@ def init_args():
 
     #
     parser.add_argument("--save_as_image", type=str2bool, default=False, help='Whether to save the result in images, disable to increase fps. (default=False)')
+    parser.add_argument("--test_run", type=str2bool, default=False, help="Whether to provide statistical comparison between the predicted and expected output from --ground_truth_path. (default=False)")
     parser.add_argument(
         "--draw_img_save_dir", type=str, default="./inference_results", help='Directory to save the output images with anchor boxes drawn when --save_as_image=True. (default=./inference_result)')
     parser.add_argument("--save_crop_res", type=str2bool, default=False, help=argparse.SUPPRESS)
