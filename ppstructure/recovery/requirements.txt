@@ -1,0 +1,6 @@
+python-docx
+PyMuPDF==1.19.0
+beautifulsoup4
+fonttools>=4.24.0
+fire>=0.3.0
+pdf2docx
