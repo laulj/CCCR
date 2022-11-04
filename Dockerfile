@@ -23,6 +23,7 @@ RUN \
  	# Install the requirements
 	pip3 install tensorflow==2.4.0 && \
 	pip3 install --upgrade -r requirements.txt && \
+	pip install https://paddleocr.bj.bcebos.com/libs/auto_log-1.2.0-py3-none-any.whl && \
 	apt-get update
 	
-CMD ["/bin/bash", "cat", "verbose.txt"]
+CMD ["/bin/bash", "cat", "README.md"]

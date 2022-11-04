@@ -13,11 +13,12 @@ Container Character Code Recognition, a final year project continuation from bac
 
 ## Usages
 1. cd to PaddleOCR if not already,
-2. To predict with testdata (./firebase_pull):
+
+2. To predict with testdata (./test_data), RUN:
 ```
-    - Multi-thread GPU: RUN "python3 tools/infer/predict_system.py --test_run=True --gpu_mem=21000 --det_limit_side_len=1080 --use_mp=True --total_process_num=8 --warmup=True"
-    - Single-thread GPU: RUN "python3 tools/infer/predict_system.py --test_run=True --gpu_mem=21000 --det_limit_side_len=1080 --warmup=True"
-    - CPU: RUN "python3 tools/infer/predict_system.py --test_run=True --use_gpu=False --det_limit_side_len=1080 --enable_mkldnn=True --cpu_threads=12 --warmup=True"
+    - Multi-thread GPU  : python3 tools/infer/predict_system.py --test_run=True --gpu_mem=21000 --det_limit_side_len=1080 --use_mp=True --total_process_num=8 --warmup=True
+    - Single-thread GPU : python3 tools/infer/predict_system.py --test_run=True --gpu_mem=21000 --det_limit_side_len=1080 --warmup=True
+    - CPU               : python3 tools/infer/predict_system.py --test_run=True --use_gpu=False --det_limit_side_len=1080 --enable_mkldnn=True --cpu_threads=12 --warmup=True
 ```
 
 ## Tested Results
@@ -40,17 +41,37 @@ please consider experimenting and changing the following parameters:
 | --cpu_threads        (default = 10)                                           | The limit of the no. of cpu threads to use in prediction.                                                       |
 | --use_mp             (default = False)                                        | To enable multi-process prediction.                                                                             |
 | --total_process_num  (default = 1)                                            | The no. of threads to use in prediction, DO NOT set when --use_mp=False.                                        |
-| --det_limit_side_len (default = 960)                                          | The reduce in parameter --det_limit_side_len will increase the fps greatly at the tradeoff of accuracy.         |
+| --det_limit_side_len (default = 960)                                          | The reduce in parameter --det_limit_side_len will increase the fps marginally at the tradeoff of accuracy.      |
 |                                                                        **I/O DIRECTORY**                                                                                                        |
-| --image_dir          (default="./test_data/")                             | The image to be processed, input images directory.                                                              |
+| --image_dir          (default = ./test_data/)                                 | The image to be processed, input images directory.                                                              |
 | --draw_img_save_dir  (default = ./inference_result)                           | Directory to save the output images with anchor boxes drawn when --save_as_image=True.                          |
 | --save_log_path      (default = ./log_output/)                                | Directory to save the output log.                                                                               |
 | --ground_truth_path  (default = ./train_data/BP_CCC_Rec/test/rec_gt_test.txt) | Text file for the groundtruth of the provided test/input dataset (images) for computing the overall precision.  |
 |                                                                        **INFO and DEBUG**                                                                                                       |
 | --test_run           (default = False)                                        | Whether to provide statistical comparison between the predicted and expected output from --ground_truth_path.   |
-| --save_as_image      (default = False)                                        | To save prediction in images, where saving as images will reduce fps drastically.                               |
+| --save_as_image      (default = False)                                        | To save prediction in images, where saving as images will reduce fps marginally.                                |
 | --show_log           (default = False)                                        | To show debug messages.                                                                                         |
 | --benchmark          (default = False)                                        | To benchmark the machine's inference speed, memory usage, and etc.                                              |
+
+## Docker Usage
+Usages are referring to current docker image with tag: laulj/ccc_ocr-tensorflow-cuda11.2:1.1.0
+1. To mount your dataset directory from your machine into the docker container, uncomment and complete the docker-compose.yaml in your local directory:
+
+```
+    Volumes:
+        - ./dataset:<your_dataset_directory>
+```
+
+where the format is : - <container_directory>:<local_directory> and ensure that <local_directory> exists and is an absolute path.
+
+2. To update the changes, if the container is already running, RUN
+
+'''
+    sudo docker compose down
+    sudo docker compose up -d
+'''
+
+3. To use the dataset mounted, set --img_dir=<container_directory>
 
 ## NOTES
 To display more optional arguments, RUN 
