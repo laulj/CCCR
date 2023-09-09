@@ -16,5 +16,13 @@ openpyxl
 attrdict
 Polygon3
 lanms-neo==1.0.2
+protobuf==3.19.3
 PyMuPDF==1.19.0
 pyrebase
+Pillow==8.4.0
+numpy==1.19.5
+python-dotenv
+flask
+docker
+flask_socketio
+flask_cors

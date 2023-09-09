@@ -1,4 +1,4 @@
-# Copyright (c) 2020 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2020-2023 Lok Jing Lau PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -15,145 +15,461 @@
 import argparse
 import os
 import sys
+import threading
 import platform
 import cv2
 import numpy as np
 import paddle
-from PIL import Image, ImageDraw, ImageFont
-import math
-from paddle import inference
 import time
 import random
+import math
+from PIL import Image, ImageDraw, ImageFont
+from paddle import inference
 from ppocr.utils.logging import get_logger
+
+
+class VideoPlayer:
+    """
+    Custom video player to fulfill FPS requirements. You can set target FPS and output size,
+    flip the video horizontally or skip first N frames.
+
+    :param source: Video source. It could be either camera device or video file.
+    :param size: Output frame size.
+    :param flip: Flip source horizontally.
+    :param fps: Target FPS.
+    :param skip_first_frames: Skip first N frames.
+    """
+
+    def __init__(self, source, size=None, flip=False, fps=None, skip_first_frames=0):
+        self.__cap = cv2.VideoCapture(source)
+        if not self.__cap.isOpened():
+            raise RuntimeError(
+                f"Cannot open {'camera' if isinstance(source, int) else ''} {source}"
+            )
+        print("\n\nno error")
+        # skip first N frames
+        self.__cap.set(cv2.CAP_PROP_POS_FRAMES, skip_first_frames)
+        # fps of input file
+        self.__input_fps = self.__cap.get(cv2.CAP_PROP_FPS)
+        if self.__input_fps <= 0:
+            self.__input_fps = 60
+        # target fps given by user
+        self.__output_fps = fps if fps is not None else self.__input_fps
+        self.__flip = flip
+        self.__size = None
+        self.__interpolation = None
+        if size is not None:
+            self.__size = size
+            # AREA better for shrinking, LINEAR better for enlarging
+            self.__interpolation = (
+                cv2.INTER_AREA
+                if size[0] < self.__cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                else cv2.INTER_LINEAR
+            )
+        # first frame
+        _, self.__frame = self.__cap.read()
+        self.__lock = threading.Lock()
+        self.__thread = None
+        self.__stop = False
+
+    """
+    Start playing.
+    """
+
+    def start(self):
+        self.__stop = False
+        self.__thread = threading.Thread(target=self.__run, daemon=True)
+        self.__thread.start()
+
+    """
+    Stop playing and release resources.
+    """
+
+    def stop(self):
+        self.__stop = True
+        if self.__thread is not None:
+            self.__thread.join()
+        self.__cap.release()
+
+    def __run(self):
+        prev_time = 0
+        while not self.__stop:
+            t1 = time.time()
+            ret, frame = self.__cap.read()
+            if not ret:
+                break
+
+            # fulfill target fps
+            if 1 / self.__output_fps < time.time() - prev_time:
+                prev_time = time.time()
+                # replace by current frame
+                with self.__lock:
+                    self.__frame = frame
+
+            t2 = time.time()
+            # time to wait [s] to fulfill input fps
+            wait_time = 1 / self.__input_fps - (t2 - t1)
+            # wait until
+            time.sleep(max(0, wait_time))
+
+        self.__frame = None
+
+    """
+    Get current frame.
+    """
+
+    def next(self):
+        with self.__lock:
+            if self.__frame is None:
+                return None
+            # need to copy frame, because can be cached and reused if fps is low
+            frame = self.__frame.copy()
+        if self.__size is not None:
+            frame = cv2.resize(frame, self.__size, interpolation=self.__interpolation)
+        if self.__flip:
+            frame = cv2.flip(frame, 1)
+        return frame
 
 
 def str2bool(v):
     return v.lower() in ("true", "t", "1")
 
+
 def printepilog():
     print("hi")
-    
+
+
 def init_args():
-    parser = argparse.ArgumentParser(description = 'A python script that integrate both detection and recognition inference into a pipeline. \
+    parser = argparse.ArgumentParser(
+        description='A python script that integrate both detection and recognition inference into a pipeline. \
         To predict with GPU, RUN "python3 tools/infer/predict_system.py --gpu_mem=21000 --det_limit_side_len=1080 --use_mp=True --total_process_num=8 --warmup=True". \
             To predict with CPU, RUN "python3 tools/infer/predict_system.py --use_gpu=False --det_limit_side_len=1080 --enable_mkldnn=True --cpu_threads=12 --warmup=True".',
-            epilog='Notes: The provided options are tested under AMD Ryzen 9 5900X 12-Core Processor and gpu RTX3090, for optiomal usage, please consider changing the paramters --gpu_mem, --cpu_threads, --use_mp, --total_process_num, and --det_limit_side_len. \
+        epilog="Notes: The provided options are tested under AMD Ryzen 9 5900X 12-Core Processor and gpu RTX3090, for optiomal usage, please consider changing the paramters --gpu_mem, --cpu_threads, --use_mp, --total_process_num, and --det_limit_side_len. \
                 The reduce in parameter --det_limit_side_len will increase the fps at the tradeoff of accuracy. For single-thread prediction, set --use_mp=False, and do not set --total_process_num to default it to 1. \
-                    To use cpu for prediction, set --use_gpu=False. To show debug messages, set --show_log=True. To save prediction in images, set --save_as_image=True, where saving in images will reduce fps drastically.')
+                    To use cpu for prediction, set --use_gpu=False. To show debug messages, set --show_log=True. To save prediction in images, set --save_as_image=True, where saving in images will reduce fps drastically.",
+    )
     # params for prediction engine
-    parser.add_argument("--use_gpu", type=str2bool, default=True, help='Whether to enable GPU for prediction. (default=True)')
-    parser.add_argument("--use_xpu", type=str2bool, default=False, help=argparse.SUPPRESS)
-    parser.add_argument("--use_npu", type=str2bool, default=False, help=argparse.SUPPRESS)
-    parser.add_argument("--ir_optim", type=str2bool, default=True, help=argparse.SUPPRESS)
-    parser.add_argument("--use_tensorrt", type=str2bool, default=False, help=argparse.SUPPRESS)
-    parser.add_argument("--min_subgraph_size", type=int, default=15, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--use_gpu",
+        type=str2bool,
+        default=True,
+        help="Whether to enable GPU for prediction. (default=True)",
+    )
+    parser.add_argument(
+        "--use_xpu", type=str2bool, default=False, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--use_npu", type=str2bool, default=False, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--ir_optim", type=str2bool, default=True, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--use_tensorrt", type=str2bool, default=False, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--min_subgraph_size", type=int, default=15, help=argparse.SUPPRESS
+    )
     parser.add_argument("--precision", type=str, default="fp32", help=argparse.SUPPRESS)
-    parser.add_argument("--gpu_mem", type=int, default=500, help='The limit on GPU memory usage. (default: 500)')
+    parser.add_argument(
+        "--gpu_mem",
+        type=int,
+        default=500,
+        help="The limit on GPU memory usage. (default: 500)",
+    )
 
     # params for text detector
-    parser.add_argument("--image_dir", type=str, default="./test_data/", help='The image to be processed, input images directory. (default="./firebase_pull/")')
+    parser.add_argument(
+        "--input_type",
+        type=str,
+        default="img",
+        help='The input data type, "img" or "video" or "cam" (default="img")',
+    )
+    parser.add_argument(
+        "--image_dir",
+        type=str,
+        default="./test_data/",
+        help='The image to be processed, input images directory. (default="./test_data/")',
+    )
+    parser.add_argument(
+        "--cam_pos",
+        type=int,
+        default=0,
+        help='The camera position if the input_type == "cam". (default=0)',
+    )
     parser.add_argument("--page_num", type=int, default=0, help=argparse.SUPPRESS)
-    parser.add_argument("--det_algorithm", type=str, default='DB', help=argparse.SUPPRESS)
-    parser.add_argument("--det_model_dir", type=str,  default="./inference/det_db_r50_vd/", help='The detection model inference path. (default="./inference/det_db_r50_vd/")')
-    parser.add_argument("--det_limit_side_len", type=float, default=960, help='The width or the longest side of the input image to the detection model. (default=960)')
-    parser.add_argument("--det_limit_type", type=str, default='max', help=argparse.SUPPRESS)
-    parser.add_argument("--det_box_type", type=str, default='quad', help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--det_algorithm", type=str, default="DB", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--det_model_dir",
+        type=str,
+        default="./inference/det_db_r50_vd/",
+        help='The detection model inference path. (default="./inference/det_db_r50_vd/")',
+    )
+    parser.add_argument(
+        "--det_limit_side_len",
+        type=float,
+        default=960,
+        help="The width or the longest side of the input image to the detection model. (default=960)",
+    )
+    parser.add_argument(
+        "--det_limit_type", type=str, default="max", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--det_box_type", type=str, default="quad", help=argparse.SUPPRESS
+    )
 
     # DB parmas
-    parser.add_argument("--det_db_thresh", type=float, default=0.5, help=argparse.SUPPRESS)
-    parser.add_argument("--det_db_box_thresh", type=float, default=0.5, help=argparse.SUPPRESS)
-    parser.add_argument("--det_db_unclip_ratio", type=float, default=2.0, help=argparse.SUPPRESS)
-    parser.add_argument("--max_batch_size", type=int, default=10, help='The maximum batch size for detection model. (default: 10)')
-    parser.add_argument("--use_dilation", type=str2bool, default=False, help=argparse.SUPPRESS)
-    parser.add_argument("--det_db_score_mode", type=str, default="fast", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--det_db_thresh", type=float, default=0.5, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--det_db_box_thresh", type=float, default=0.5, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--det_db_unclip_ratio", type=float, default=2.0, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--max_batch_size",
+        type=int,
+        default=10,
+        help="The maximum batch size for detection model. (default: 10)",
+    )
+    parser.add_argument(
+        "--use_dilation", type=str2bool, default=False, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--det_db_score_mode", type=str, default="fast", help=argparse.SUPPRESS
+    )
 
     # EAST parmas
-    parser.add_argument("--det_east_score_thresh", type=float, default=0.8, help=argparse.SUPPRESS)
-    parser.add_argument("--det_east_cover_thresh", type=float, default=0.1, help=argparse.SUPPRESS)
-    parser.add_argument("--det_east_nms_thresh", type=float, default=0.2, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--det_east_score_thresh", type=float, default=0.8, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--det_east_cover_thresh", type=float, default=0.1, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--det_east_nms_thresh", type=float, default=0.2, help=argparse.SUPPRESS
+    )
 
     # SAST parmas
-    parser.add_argument("--det_sast_score_thresh", type=float, default=0.5, help=argparse.SUPPRESS)
-    parser.add_argument("--det_sast_nms_thresh", type=float, default=0.2, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--det_sast_score_thresh", type=float, default=0.5, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--det_sast_nms_thresh", type=float, default=0.2, help=argparse.SUPPRESS
+    )
 
     # PSE parmas
-    parser.add_argument("--det_pse_thresh", type=float, default=0, help=argparse.SUPPRESS)
-    parser.add_argument("--det_pse_box_thresh", type=float, default=0.85, help=argparse.SUPPRESS)
-    parser.add_argument("--det_pse_min_area", type=float, default=16, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--det_pse_thresh", type=float, default=0, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--det_pse_box_thresh", type=float, default=0.85, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--det_pse_min_area", type=float, default=16, help=argparse.SUPPRESS
+    )
     parser.add_argument("--det_pse_scale", type=int, default=1, help=argparse.SUPPRESS)
 
     # FCE parmas
-    parser.add_argument("--scales", type=list, default=[8, 16, 32], help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--scales", type=list, default=[8, 16, 32], help=argparse.SUPPRESS
+    )
     parser.add_argument("--alpha", type=float, default=1.0, help=argparse.SUPPRESS)
     parser.add_argument("--beta", type=float, default=1.0, help=argparse.SUPPRESS)
     parser.add_argument("--fourier_degree", type=int, default=5, help=argparse.SUPPRESS)
 
     # params for text recognizer
-    parser.add_argument("--rec_algorithm", type=str, default='SRN', help=argparse.SUPPRESS)
-    parser.add_argument("--rec_model_dir", type=str, default="./inference/rec_srn/", help='The recognition model inferencepath. (default="./inference/rec_srn/")')
-    parser.add_argument("--rec_image_inverse", type=str2bool, default=True, help=argparse.SUPPRESS)
-    parser.add_argument("--rec_image_shape", type=str, default="1, 64, 256", help=argparse.SUPPRESS)
-    parser.add_argument("--rec_batch_num", type=int, default=6, help='The batch size for recognition model. (default: 6)')
-    parser.add_argument("--max_text_length", type=int, default=25, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--rec_algorithm", type=str, default="SRN", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--rec_model_dir",
+        type=str,
+        default="./inference/rec_srn/",
+        help='The recognition model inference path. (default="./inference/rec_srn/")',
+    )
+    parser.add_argument(
+        "--rec_image_inverse", type=str2bool, default=True, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--rec_image_shape", type=str, default="1, 64, 256", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--rec_batch_num",
+        type=int,
+        default=6,
+        help="The batch size for recognition model. (default: 6)",
+    )
+    parser.add_argument(
+        "--max_text_length", type=int, default=25, help=argparse.SUPPRESS
+    )
     parser.add_argument(
         "--rec_char_dict_path",
         type=str,
-        default="./ppocr/utils/ic15_dict_onlyUpperCASE.txt", help=argparse.SUPPRESS)
-    parser.add_argument("--use_space_char", type=str2bool, default=True, help=argparse.SUPPRESS)
+        default="./ppocr/utils/ic15_dict_onlyUpperCASE.txt",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument(
-        "--vis_font_path", type=str, default="./doc/fonts/simfang.ttf", help=argparse.SUPPRESS)
-    parser.add_argument("--drop_score", type=float, default=0.5, help='Recognition with confidence level below this value will be discarded. (default=0.5)')
+        "--use_space_char", type=str2bool, default=True, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--vis_font_path",
+        type=str,
+        default="./doc/fonts/simfang.ttf",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--drop_score",
+        type=float,
+        default=0.5,
+        help="Recognition with confidence level below this value will be discarded. (default=0.5)",
+    )
 
     # params for e2e
-    parser.add_argument("--e2e_algorithm", type=str, default='PGNet', help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--e2e_algorithm", type=str, default="PGNet", help=argparse.SUPPRESS
+    )
     parser.add_argument("--e2e_model_dir", type=str, help=argparse.SUPPRESS)
-    parser.add_argument("--e2e_limit_side_len", type=float, default=768, help=argparse.SUPPRESS)
-    parser.add_argument("--e2e_limit_type", type=str, default='max', help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--e2e_limit_side_len", type=float, default=768, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--e2e_limit_type", type=str, default="max", help=argparse.SUPPRESS
+    )
 
     # PGNet parmas
-    parser.add_argument("--e2e_pgnet_score_thresh", type=float, default=0.5, help=argparse.SUPPRESS)
     parser.add_argument(
-        "--e2e_char_dict_path", type=str, default="./ppocr/utils/ic15_dict.txt", help=argparse.SUPPRESS)
-    parser.add_argument("--e2e_pgnet_valid_set", type=str, default='totaltext', help=argparse.SUPPRESS)
-    parser.add_argument("--e2e_pgnet_mode", type=str, default='fast', help=argparse.SUPPRESS)
+        "--e2e_pgnet_score_thresh", type=float, default=0.5, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--e2e_char_dict_path",
+        type=str,
+        default="./ppocr/utils/ic15_dict.txt",
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--e2e_pgnet_valid_set", type=str, default="totaltext", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--e2e_pgnet_mode", type=str, default="fast", help=argparse.SUPPRESS
+    )
 
     # params for text classifier
-    parser.add_argument("--use_angle_cls", type=str2bool, default=False, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--use_angle_cls", type=str2bool, default=False, help=argparse.SUPPRESS
+    )
     parser.add_argument("--cls_model_dir", type=str, help=argparse.SUPPRESS)
-    parser.add_argument("--cls_image_shape", type=str, default="3, 48, 192", help=argparse.SUPPRESS)
-    parser.add_argument("--label_list", type=list, default=['0', '180'], help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--cls_image_shape", type=str, default="3, 48, 192", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--label_list", type=list, default=["0", "180"], help=argparse.SUPPRESS
+    )
     parser.add_argument("--cls_batch_num", type=int, default=6, help=argparse.SUPPRESS)
     parser.add_argument("--cls_thresh", type=float, default=0.9, help=argparse.SUPPRESS)
 
-    parser.add_argument("--enable_mkldnn", type=str2bool, default=False, help="Intel(R) Math Kernel Library for Deep Neural Networks(MKL-DNN) includes basic building blocks for neural networks optimized for Intel Architecture Processors and Intel Processors Graphics. (default=False)")
-    parser.add_argument("--cpu_threads", type=int, default=10, help="The limit of the no. of cpu threads to use in prediction. (default=10)")
-    parser.add_argument("--use_pdserving", type=str2bool, default=False, help=argparse.SUPPRESS)
-    parser.add_argument("--warmup", type=str2bool, default=False, help='To make some arbitrary predictions before beginning the main prediction, enable this to stabilise the fps when benchmarking. (default=False)')
+    parser.add_argument(
+        "--enable_mkldnn",
+        type=str2bool,
+        default=False,
+        help="Intel(R) Math Kernel Library for Deep Neural Networks(MKL-DNN) includes basic building blocks for neural networks optimized for Intel Architecture Processors and Intel Processors Graphics. (default=False)",
+    )
+    parser.add_argument(
+        "--cpu_threads",
+        type=int,
+        default=10,
+        help="The limit of the no. of cpu threads to use in prediction. (default=10)",
+    )
+    parser.add_argument(
+        "--use_pdserving", type=str2bool, default=False, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--warmup",
+        type=str2bool,
+        default=False,
+        help="To make some arbitrary predictions before beginning the main prediction, enable this to stabilise the fps when benchmarking. (default=False)",
+    )
 
     # SR parmas
     parser.add_argument("--sr_model_dir", type=str, help=argparse.SUPPRESS)
-    parser.add_argument("--sr_image_shape", type=str, default="3, 32, 128", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--sr_image_shape", type=str, default="3, 32, 128", help=argparse.SUPPRESS
+    )
     parser.add_argument("--sr_batch_num", type=int, default=1, help=argparse.SUPPRESS)
 
     #
-    parser.add_argument("--save_as_image", type=str2bool, default=False, help='Whether to save the result in images, disable to increase fps. (default=False)')
-    parser.add_argument("--test_run", type=str2bool, default=False, help="Whether to provide statistical comparison between the predicted and expected output from --ground_truth_path. (default=False)")
     parser.add_argument(
-        "--draw_img_save_dir", type=str, default="./inference_results", help='Directory to save the output images with anchor boxes drawn when --save_as_image=True. (default=./inference_result)')
-    parser.add_argument("--save_crop_res", type=str2bool, default=False, help=argparse.SUPPRESS)
-    parser.add_argument("--crop_res_save_dir", type=str, default="./output", help=argparse.SUPPRESS)
-    parser.add_argument("--ground_truth_path", type=str, default="./train_data/BP_CCC_Rec/test/rec_gt_test.txt", help='Text file for the groundtruth of the provided test/input dataset (images) for computing the overall precision. (default=./train_data/BP_CCC_Rec/test/rec_gt_test.txt)')
+        "--save_as_image",
+        type=str2bool,
+        default=False,
+        help="Whether to save the result in images, disable to increase fps. (default=False)",
+    )
+    parser.add_argument(
+        "--test_run",
+        type=str2bool,
+        default=False,
+        help="Whether to provide statistical comparison between the predicted and expected output from --ground_truth_path. (default=False)",
+    )
+    parser.add_argument(
+        "--draw_img_save_dir",
+        type=str,
+        default="./inference_results",
+        help="Directory to save the output images with anchor boxes drawn when --save_as_image=True. (default=./inference_result)",
+    )
+    parser.add_argument(
+        "--save_crop_res", type=str2bool, default=False, help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--crop_res_save_dir", type=str, default="./output", help=argparse.SUPPRESS
+    )
+    parser.add_argument(
+        "--ground_truth_path",
+        type=str,
+        default="./train_data/BP_CCC_Rec/test/rec_gt_test.txt",
+        help="For images input, a text file for the groundtruth of the provided test/input dataset (images) for computing the overall precision. (default=./train_data/BP_CCC_Rec/test/rec_gt_test.txt)",
+    )
 
     # multi-process
-    parser.add_argument("--use_mp", type=str2bool, default=False, help='To enable multi-process prediction. (default=False)')
-    parser.add_argument("--total_process_num", type=int, default=1, help='The number of processes to use when --use_mp=True. (default=1)')
+    parser.add_argument(
+        "--use_mp",
+        type=str2bool,
+        default=False,
+        help="To enable multi-process prediction. (default=False)",
+    )
+    parser.add_argument(
+        "--total_process_num",
+        type=int,
+        default=1,
+        help="The number of processes to use when --use_mp=True. (default=1)",
+    )
     parser.add_argument("--process_id", type=int, default=0, help=argparse.SUPPRESS)
 
-    parser.add_argument("--benchmark", type=str2bool, default=False, help='To benchmark the machine\'s inference speed, memory usage, and etc. (default=False)')
-    parser.add_argument("--save_log_path", type=str, default="./log_output/", help='Directory to save the output log. (default=./log_output/)')
+    parser.add_argument(
+        "--benchmark",
+        type=str2bool,
+        default=False,
+        help="To benchmark the machine's inference speed, memory usage, and etc. (default=False)",
+    )
+    parser.add_argument(
+        "--save_log_path",
+        type=str,
+        default="./log_output/",
+        help="Directory to save the output log. (default=./log_output/)",
+    )
 
-    parser.add_argument("--show_log", type=str2bool, default=False, help='To display debug message during runtime, default=False')
-    parser.add_argument("--use_onnx", type=str2bool, default=False, help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--show_log",
+        type=str2bool,
+        default=False,
+        help="To display debug message during runtime, default=False",
+    )
+    parser.add_argument(
+        "--use_onnx", type=str2bool, default=False, help=argparse.SUPPRESS
+    )
     return parser
 
 
@@ -165,19 +481,19 @@ def parse_args():
 def create_predictor(args, mode, logger):
     if mode == "det":
         model_dir = args.det_model_dir
-    elif mode == 'cls':
+    elif mode == "cls":
         model_dir = args.cls_model_dir
-    elif mode == 'rec':
+    elif mode == "rec":
         model_dir = args.rec_model_dir
-    elif mode == 'table':
+    elif mode == "table":
         model_dir = args.table_model_dir
-    elif mode == 'ser':
+    elif mode == "ser":
         model_dir = args.ser_model_dir
-    elif mode == 're':
+    elif mode == "re":
         model_dir = args.re_model_dir
     elif mode == "sr":
         model_dir = args.sr_model_dir
-    elif mode == 'layout':
+    elif mode == "layout":
         model_dir = args.layout_model_dir
     else:
         model_dir = args.e2e_model_dir
@@ -187,33 +503,34 @@ def create_predictor(args, mode, logger):
         sys.exit(0)
     if args.use_onnx:
         import onnxruntime as ort
+
         model_file_path = model_dir
         if not os.path.exists(model_file_path):
-            raise ValueError("not find model file path {}".format(
-                model_file_path))
+            raise ValueError("not find model file path {}".format(model_file_path))
         sess = ort.InferenceSession(model_file_path)
         return sess, sess.get_inputs()[0], None, None
 
     else:
-        file_names = ['model', 'inference']
+        file_names = ["model", "inference"]
         for file_name in file_names:
-            model_file_path = '{}/{}.pdmodel'.format(model_dir, file_name)
-            params_file_path = '{}/{}.pdiparams'.format(model_dir, file_name)
-            if os.path.exists(model_file_path) and os.path.exists(
-                    params_file_path):
+            model_file_path = "{}/{}.pdmodel".format(model_dir, file_name)
+            params_file_path = "{}/{}.pdiparams".format(model_dir, file_name)
+            if os.path.exists(model_file_path) and os.path.exists(params_file_path):
                 break
         if not os.path.exists(model_file_path):
             raise ValueError(
-                "not find model.pdmodel or inference.pdmodel in {}".format(
-                    model_dir))
+                "not find model.pdmodel or inference.pdmodel in {}".format(model_dir)
+            )
         if not os.path.exists(params_file_path):
             raise ValueError(
                 "not find model.pdiparams or inference.pdiparams in {}".format(
-                    model_dir))
+                    model_dir
+                )
+            )
 
         config = inference.Config(model_file_path, params_file_path)
 
-        if hasattr(args, 'precision'):
+        if hasattr(args, "precision"):
             if args.precision == "fp16" and args.use_tensorrt:
                 precision = inference.PrecisionType.Half
             elif args.precision == "int8":
@@ -235,21 +552,18 @@ def create_predictor(args, mode, logger):
                     workspace_size=1 << 30,
                     precision_mode=precision,
                     max_batch_size=args.max_batch_size,
-                    min_subgraph_size=args.
-                    min_subgraph_size,  # skip the minmum trt subgraph
-                    use_calib_mode=False)
+                    min_subgraph_size=args.min_subgraph_size,  # skip the minmum trt subgraph
+                    use_calib_mode=False,
+                )
 
                 # collect shape
-                trt_shape_f = os.path.join(model_dir,
-                                           f"{mode}_trt_dynamic_shape.txt")
+                trt_shape_f = os.path.join(model_dir, f"{mode}_trt_dynamic_shape.txt")
 
                 if not os.path.exists(trt_shape_f):
                     config.collect_shape_range_info(trt_shape_f)
-                    logger.info(
-                        f"collect dynamic shape info into : {trt_shape_f}")
+                    logger.info(f"collect dynamic shape info into : {trt_shape_f}")
                 try:
-                    config.enable_tuned_tensorrt_dynamic_shape(trt_shape_f,
-                                                               True)
+                    config.enable_tuned_tensorrt_dynamic_shape(trt_shape_f, True)
                 except Exception as E:
                     logger.info(E)
                     logger.info("Please keep your paddlepaddle-gpu >= 2.3.0!")
@@ -276,9 +590,9 @@ def create_predictor(args, mode, logger):
         config.disable_glog_info()
         config.delete_pass("conv_transpose_eltwiseadd_bn_fuse_pass")
         config.delete_pass("matmul_transpose_reshape_fuse_pass")
-        if mode == 're':
+        if mode == "re":
             config.delete_pass("simplify_with_basic_ops_pass")
-        if mode == 'table':
+        if mode == "table":
             config.delete_pass("fc_fuse_pass")  # not supported for table
         config.switch_use_feed_fetch_ops(False)
         config.switch_ir_optim(True)
@@ -286,7 +600,7 @@ def create_predictor(args, mode, logger):
         # create predictor
         predictor = inference.create_predictor(config)
         input_names = predictor.get_input_names()
-        if mode in ['ser', 're']:
+        if mode in ["ser", "re"]:
             input_tensor = []
             for name in input_names:
                 input_tensor.append(predictor.get_input_handle(name))
@@ -301,7 +615,7 @@ def get_output_tensors(args, mode, predictor):
     output_names = predictor.get_output_names()
     output_tensors = []
     if mode == "rec" and args.rec_algorithm in ["CRNN", "SVTR_LCNet"]:
-        output_name = 'softmax_0.tmp_0'
+        output_name = "softmax_0.tmp_0"
         if output_name in output_names:
             return [predictor.get_output_handle(output_name)]
         else:
@@ -344,7 +658,8 @@ def draw_e2e_res(dt_boxes, strs, img_path):
             fontFace=cv2.FONT_HERSHEY_COMPLEX,
             fontScale=0.7,
             color=(0, 255, 0),
-            thickness=1)
+            thickness=1,
+        )
     return src_im
 
 
@@ -367,12 +682,14 @@ def resize_img(img, input_size=600):
     return img
 
 
-def draw_ocr(image,
-             boxes,
-             txts=None,
-             scores=None,
-             drop_score=0.5,
-             font_path="./doc/fonts/simfang.ttf"):
+def draw_ocr(
+    image,
+    boxes,
+    txts=None,
+    scores=None,
+    drop_score=0.5,
+    font_path="./doc/fonts/simfang.ttf",
+):
     """
     Visualize the results of OCR detection and recognition
     args:
@@ -389,8 +706,7 @@ def draw_ocr(image,
         scores = [1] * len(boxes)
     box_num = len(boxes)
     for i in range(box_num):
-        if scores is not None and (scores[i] < drop_score or
-                                   math.isnan(scores[i])):
+        if scores is not None and (scores[i] < drop_score or math.isnan(scores[i])):
             continue
         box = np.reshape(np.array(boxes[i]), [-1, 1, 2]).astype(np.int64)
         image = cv2.polylines(np.array(image), [box], True, (255, 0, 0), 2)
@@ -402,65 +718,97 @@ def draw_ocr(image,
             img_h=img.shape[0],
             img_w=600,
             threshold=drop_score,
-            font_path=font_path)
+            font_path=font_path,
+        )
         img = np.concatenate([np.array(img), np.array(txt_img)], axis=1)
         return img
     return image
 
 
-def draw_ocr_box_txt(image,
-                     boxes,
-                     txts=None,
-                     scores=None,
-                     drop_score=0.5,
-                     font_path="./doc/fonts/simfang.ttf"):
+def draw_ocr_box_txt(
+    image,
+    boxes,
+    txts=None,
+    scores=None,
+    drop_score=0.5,
+    font_path="./doc/fonts/simfang.ttf",
+):
     h, w = image.height, image.width
     img_left = image.copy()
     img_right = np.ones((h, w, 3), dtype=np.uint8) * 255
     random.seed(0)
-
+    # print("image shape:", h,w)
+    # im = np.array(img_left)
+    # cv2.rectangle(im, (0, 0), (int(500), int(720)), (int(0), int(255), int(0)), int(30))
+    # cv2.imshow(winname="Press ESC to Exit", mat=im)
+    # cv2.waitKey(0)
     draw_left = ImageDraw.Draw(img_left)
+
+    # img_left.show()
+    # cv2.waitKey(0)
     if txts is None or len(txts) != len(boxes):
         txts = [None] * len(boxes)
     for idx, (box, txt) in enumerate(zip(boxes, txts)):
         if scores is not None and scores[idx] < drop_score:
             continue
-        color = (random.randint(0, 255), random.randint(0, 255),
-                 random.randint(0, 255))
+        color = (random.randint(0, 255), random.randint(0, 255), random.randint(0, 255))
         draw_left.polygon(box, fill=color)
         img_right_text = draw_box_txt_fine((w, h), box, txt, font_path)
         pts = np.array(box, np.int32).reshape((-1, 1, 2))
         cv2.polylines(img_right_text, [pts], True, color, 1)
         img_right = cv2.bitwise_and(img_right, img_right_text)
+    # Highlights the detected boxes by 0.5 opacity
     img_left = Image.blend(image, img_left, 0.5)
-    img_show = Image.new('RGB', (w * 2, h), (255, 255, 255))
+
+    # Draw the recognized text on bottom right corner of the frame
+    xOffset, yOffset = 225, 125
+    draw_left = ImageDraw.Draw(img_left)
+    draw_left.rectangle(
+        ((w - xOffset, h - yOffset), (w, h - yOffset - 75)), fill="black", outline="red"
+    )
+    # Account for no recognized text case
+    try:
+        draw_left.text(
+            (w - xOffset + 20, h - yOffset - 55),
+            txts[0],
+            fill="white",
+            font=ImageFont.truetype("./doc/fonts/simfang.ttf", 28, encoding="utf-8"),
+        )
+    except IndexError:
+        pass
+
+    """img_show = Image.new('RGB', (w * 2, h), (255, 255, 255))
     img_show.paste(img_left, (0, 0, w, h))
     img_show.paste(Image.fromarray(img_right), (w, 0, w * 2, h))
-    return np.array(img_show)
+    return np.array(img_show)"""
+    return np.array(img_left)
 
 
 def draw_box_txt_fine(img_size, box, txt, font_path="./doc/fonts/simfang.ttf"):
     box_height = int(
-        math.sqrt((box[0][0] - box[3][0])**2 + (box[0][1] - box[3][1])**2))
+        math.sqrt((box[0][0] - box[3][0]) ** 2 + (box[0][1] - box[3][1]) ** 2)
+    )
     box_width = int(
-        math.sqrt((box[0][0] - box[1][0])**2 + (box[0][1] - box[1][1])**2))
+        math.sqrt((box[0][0] - box[1][0]) ** 2 + (box[0][1] - box[1][1]) ** 2)
+    )
 
     if box_height > 2 * box_width and box_height > 30:
-        img_text = Image.new('RGB', (box_height, box_width), (255, 255, 255))
+        img_text = Image.new("RGB", (box_height, box_width), (255, 255, 255))
         draw_text = ImageDraw.Draw(img_text)
         if txt:
             font = create_font(txt, (box_height, box_width), font_path)
             draw_text.text([0, 0], txt, fill=(0, 0, 0), font=font)
         img_text = img_text.transpose(Image.ROTATE_270)
     else:
-        img_text = Image.new('RGB', (box_width, box_height), (255, 255, 255))
+        img_text = Image.new("RGB", (box_width, box_height), (255, 255, 255))
         draw_text = ImageDraw.Draw(img_text)
         if txt:
             font = create_font(txt, (box_width, box_height), font_path)
             draw_text.text([0, 0], txt, fill=(0, 0, 0), font=font)
 
     pts1 = np.float32(
-        [[0, 0], [box_width, 0], [box_width, box_height], [0, box_height]])
+        [[0, 0], [box_width, 0], [box_width, box_height], [0, box_height]]
+    )
     pts2 = np.array(box, dtype=np.float32)
     M = cv2.getPerspectiveTransform(pts1, pts2)
 
@@ -471,7 +819,8 @@ def draw_box_txt_fine(img_size, box, txt, font_path="./doc/fonts/simfang.ttf"):
         img_size,
         flags=cv2.INTER_NEAREST,
         borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(255, 255, 255))
+        borderValue=(255, 255, 255),
+    )
     return img_right_text
 
 
@@ -496,6 +845,7 @@ def str_count(s):
         the number of Chinese characters
     """
     import string
+
     count_zh = count_pu = 0
     s_len = len(s)
     en_dg_count = 0
@@ -509,12 +859,9 @@ def str_count(s):
     return s_len - math.ceil(en_dg_count / 2)
 
 
-def text_visual(texts,
-                scores,
-                img_h=400,
-                img_w=600,
-                threshold=0.,
-                font_path="./doc/simfang.ttf"):
+def text_visual(
+    texts, scores, img_h=400, img_w=600, threshold=0.0, font_path="./doc/simfang.ttf"
+):
     """
     create new blank img and draw txt on it
     args:
@@ -527,11 +874,12 @@ def text_visual(texts,
     """
     if scores is not None:
         assert len(texts) == len(
-            scores), "The number of txts and corresponding scores must match"
+            scores
+        ), "The number of txts and corresponding scores must match"
 
     def create_blank_img():
         blank_img = np.ones(shape=[img_h, img_w], dtype=np.int8) * 255
-        blank_img[:, img_w - 1:] = 0
+        blank_img[:, img_w - 1 :] = 0
         blank_img = Image.fromarray(blank_img).convert("RGB")
         draw_txt = ImageDraw.Draw(blank_img)
         return blank_img, draw_txt
@@ -553,23 +901,23 @@ def text_visual(texts,
         first_line = True
         while str_count(txt) >= img_w // font_size - 4:
             tmp = txt
-            txt = tmp[:img_w // font_size - 4]
+            txt = tmp[: img_w // font_size - 4]
             if first_line:
-                new_txt = str(index) + ': ' + txt
+                new_txt = str(index) + ": " + txt
                 first_line = False
             else:
-                new_txt = '    ' + txt
+                new_txt = "    " + txt
             draw_txt.text((0, gap * count), new_txt, txt_color, font=font)
-            txt = tmp[img_w // font_size - 4:]
+            txt = tmp[img_w // font_size - 4 :]
             if count >= img_h // gap - 1:
                 txt_img_list.append(np.array(blank_img))
                 blank_img, draw_txt = create_blank_img()
                 count = 0
             count += 1
         if first_line:
-            new_txt = str(index) + ': ' + txt + '   ' + '%.3f' % (scores[idx])
+            new_txt = str(index) + ": " + txt + "   " + "%.3f" % (scores[idx])
         else:
-            new_txt = "  " + txt + "  " + '%.3f' % (scores[idx])
+            new_txt = "  " + txt + "  " + "%.3f" % (scores[idx])
         draw_txt.text((0, gap * count), new_txt, txt_color, font=font)
         # whether add new blank img or not
         if count >= img_h // gap - 1 and idx + 1 < len(texts):
@@ -587,7 +935,8 @@ def text_visual(texts,
 
 def base64_to_cv2(b64str):
     import base64
-    data = base64.b64decode(b64str.encode('utf8'))
+
+    data = base64.b64decode(b64str.encode("utf8"))
     data = np.frombuffer(data, np.uint8)
     data = cv2.imdecode(data, cv2.IMREAD_COLOR)
     return data
@@ -596,7 +945,7 @@ def base64_to_cv2(b64str):
 def draw_boxes(image, boxes, scores=None, drop_score=0.5):
     if scores is None:
         scores = [1] * len(boxes)
-    for (box, score) in zip(boxes, scores):
+    for box, score in zip(boxes, scores):
         if score < drop_score:
             continue
         box = np.reshape(np.array(box), [-1, 1, 2]).astype(np.int64)
@@ -605,7 +954,7 @@ def draw_boxes(image, boxes, scores=None, drop_score=0.5):
 
 
 def get_rotate_crop_image(img, points):
-    '''
+    """
     img_height, img_width = img.shape[0:2]
     left = int(np.min(points[:, 0]))
     right = int(np.max(points[:, 0]))
@@ -614,25 +963,34 @@ def get_rotate_crop_image(img, points):
     img_crop = img[top:bottom, left:right, :].copy()
     points[:, 0] = points[:, 0] - left
     points[:, 1] = points[:, 1] - top
-    '''
+    """
     assert len(points) == 4, "shape of points must be 4*2"
     img_crop_width = int(
         max(
-            np.linalg.norm(points[0] - points[1]),
-            np.linalg.norm(points[2] - points[3])))
+            np.linalg.norm(points[0] - points[1]), np.linalg.norm(points[2] - points[3])
+        )
+    )
     img_crop_height = int(
         max(
-            np.linalg.norm(points[0] - points[3]),
-            np.linalg.norm(points[1] - points[2])))
-    pts_std = np.float32([[0, 0], [img_crop_width, 0],
-                          [img_crop_width, img_crop_height],
-                          [0, img_crop_height]])
+            np.linalg.norm(points[0] - points[3]), np.linalg.norm(points[1] - points[2])
+        )
+    )
+    pts_std = np.float32(
+        [
+            [0, 0],
+            [img_crop_width, 0],
+            [img_crop_width, img_crop_height],
+            [0, img_crop_height],
+        ]
+    )
     M = cv2.getPerspectiveTransform(points, pts_std)
     dst_img = cv2.warpPerspective(
         img,
-        M, (img_crop_width, img_crop_height),
+        M,
+        (img_crop_width, img_crop_height),
         borderMode=cv2.BORDER_REPLICATE,
-        flags=cv2.INTER_CUBIC)
+        flags=cv2.INTER_CUBIC,
+    )
     dst_img_height, dst_img_width = dst_img.shape[0:2]
     if dst_img_height * 1.0 / dst_img_width >= 1.5:
         dst_img = np.rot90(dst_img)
@@ -668,5 +1026,5 @@ def check_gpu(use_gpu):
     return use_gpu
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     pass
