@@ -1,7 +1,7 @@
 services:
   ccc_ocr:
-    image: laulj/ccc_ocr-tensorflow-cuda11.2:1.3.0
-    container_name: ccc_paddleocr
+    image: laulj/ccc_ocr-tensorflow-cuda11.2:1.4.0
+    container_name: paddleocr
     stdin_open: true
     tty: true
     command: /bin/bash
